@@ -1,0 +1,152 @@
+# MBC-GCN
+
+When Do Metro Flows Improve Shared-Bike Demand Forecasts? A Cross-Modal Graph
+Learning Framework
+
+## Project Overview
+
+The code includes:
+
+· **Travel-chain reconstruction** : lock/unlock events are converted into
+continuous riding and parking segments, matched to metro station exits by
+Manhattan distance in Web Mercator metres, and aggregated onto the 5-minute AFC
+grid at four buffer radii (50, 100, 200, 500 m).
+
+· **Coupling diagnostics** : bidirectional Granger causality tests and station
+fixed-effect Negative Binomial GLMs across buffer radii, identifying the
+peak-coupling catchment used by the forecasting stages.
+
+· **Network-wide forecasting** : MBC-GCN and baseline graph models at 5-minute
+and 1-hour resolution, under AR inputs (bike flows and calendar features) and
+Semi-AR inputs (adding metro entries and exits).
+
+· **Station-level forecasting** : the same backbone with an attention module,
+trained on the full station graph but evaluated one station at a time.
+
+## Datasets
+
+This study draws on Shanghai metro AFC records and dockless shared-bike GPS
+logs covering 12–31 December 2022 (20 days). Both sources were provided by our
+partner companies and cannot be released publicly; access may be granted on
+request, and enquiries should be directed to the corresponding author.
+
+To run the code, place your own copies under `data/` with the following
+structure and column names.
+
+| File | Required columns |
+| --- | --- |
+| `bike20221212-20230101.csv` | `BICYCLE_ID`, `DATA_TIME`, `LONGITUDE`, `LATITUDE`, `LOCK_STATUS` |
+| `metro_station_coordinates.csv` | `stationnames`, `lon`, `lat` |
+| `station_info.csv` | `FSTR_LINEID`, `FSTR_STATIONID`, `FSTR_STATIONNAME` |
+| `afc_5min/HIST_STO_5MFLOW_5M_YYYYMMDD.CSV` | `FSTR_LINEID`, `FSTR_STATIONID`, `FDT_STARTTIME`, `FDT_ENDTIME`, `FINT_IN`, `FINT_OUT` |
+
+## Installation
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Usage
+
+The pipeline runs in four stages, mirroring the structure of the paper.
+
+```
+raw AFC + bike logs
+        |
+        v
+  01_build_station_panel.py      ->  5-minute station-time panel per buffer radius
+        |
+        +--> 02_coupling_diagnostics.py   -> Table 1, Table 2
+        |
+        +--> 03_forecast_global.py --resolution 5min  -> Table 6, Fig. 7
+        |
+        v
+  01b_aggregate_hourly.py        ->  hourly station-time panel per buffer radius
+        |
+        +--> 03_forecast_global.py --resolution 1h    -> Table 4, Table 5, Fig. 6
+        |
+        +--> 04_forecast_station_level.py             -> Table 7, Fig. 8
+```
+
+**Stage 1 — Travel-chain reconstruction**
+
+```bash
+python src/01_build_station_panel.py \
+    --bike-csv       data/bike20221212-20230101.csv \
+    --station-coords data/metro_station_coordinates.csv \
+    --station-info   data/station_info.csv \
+    --flow-dir       data/afc_5min \
+    --out-root       outputs/panel \
+    --buffers 50 100 200 500
+```
+
+**Stage 1b — Hourly aggregation**
+
+```bash
+python src/01b_aggregate_hourly.py --panel-root outputs/panel --buffers 50 100 200 500
+```
+
+**Stage 2 — Coupling diagnostics**
+
+```bash
+python src/02_coupling_diagnostics.py --panel-root outputs/panel --test all
+```
+
+**Stage 3 — Network-wide forecasting**
+
+```bash
+# 5-minute resolution
+python src/03_forecast_global.py --resolution 5min \
+    --panel-dir outputs/panel/100m --out-dir outputs/forecast_5min
+
+# 1-hour resolution, AR and Semi-AR inputs
+python src/03_forecast_global.py --resolution 1h --features ar \
+    --hourly-csv outputs/panel/200m/20days_data_1h.csv \
+    --out-dir outputs/forecast_1h_ar
+
+python src/03_forecast_global.py --resolution 1h --features semi_ar \
+    --hourly-csv outputs/panel/200m/20days_data_1h.csv \
+    --out-dir outputs/forecast_1h_semi_ar
+```
+
+**Stage 4 — Station-level forecasting**
+
+```bash
+python src/04_forecast_station_level.py --mode train \
+    --hourly-csv outputs/panel/200m/20days_data_1h.csv \
+    --out-dir outputs/station_level --nodes 95 144 239 298
+```
+
+Use `--mode plot` to redraw figures from saved checkpoints without retraining.
+Node indices follow the alphabetical order of station names in the hourly panel
+and must be re-checked if the station list changes.
+
+## Notes
+
+All four scripts have been run end to end on a synthetic dataset with the schema
+documented above, so the pipeline executes without errors on pandas 2.x and
+torch 2.x. A few points are recorded so that anyone rerunning the code knows
+where the published numbers cannot be regenerated from this repository alone.
+
+· **Buffer radius.** The 5-minute scenario reads the 100 m panel; the hourly
+scenarios were run against the 200 m panel. The default paths reflect what was
+actually run. Change `--hourly-csv` to the 100 m directory for a 100 m setting
+throughout.
+
+· **Hourly attention variants.** The attention-augmented rows in the Semi-AR
+block use the module implemented in stage 4. The network-wide script implements
+attention only in the 5-minute models, so these variants require the stage 4
+backbone evaluated over all stations rather than one.
+
+· **Figure 4** (kernel density of bike activity) was produced in ArcGIS and has
+no counterpart in this repository.
+
+· **Non-determinism.** Optuna searches, model initialisation and dropout are
+seeded only for the station-level sampler (`RANDOM_SEED = 20260301`). Metric
+values vary by a small margin between runs.
+
+## Citation
+
+If you use this code, please cite the paper. Data cannot be redistributed;
+requests should be directed to the corresponding author.
