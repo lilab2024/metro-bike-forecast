@@ -1,7 +1,53 @@
-# Metro–Bike Coupling Graph Convolutional Network (MBC-GCN)
+# MBC-GCN
 
-Code accompanying *"When Do Metro Flows Improve Shared-Bike Demand Forecasts?
-A Cross-Modal Graph Learning Framework"*.
+When Do Metro Flows Improve Shared-Bike Demand Forecasts? A Cross-Modal Graph
+Learning Framework
+
+## Project Overview
+
+The code includes:
+
+· **Travel-chain reconstruction** : lock/unlock events are converted into
+continuous riding and parking segments, matched to metro station exits by
+Manhattan distance in Web Mercator metres, and aggregated onto the 5-minute AFC
+grid at four buffer radii (50, 100, 200, 500 m).
+
+· **Coupling diagnostics** : bidirectional Granger causality tests and station
+fixed-effect Negative Binomial GLMs across buffer radii, identifying the
+peak-coupling catchment used by the forecasting stages.
+
+· **Network-wide forecasting** : MBC-GCN and baseline graph models at 5-minute
+and 1-hour resolution, under AR inputs (bike flows and calendar features) and
+Semi-AR inputs (adding metro entries and exits).
+
+· **Station-level forecasting** : the same backbone with an attention module,
+trained on the full station graph but evaluated one station at a time.
+
+## Datasets
+
+This study draws on Shanghai metro AFC records and dockless shared-bike GPS
+logs covering 12–31 December 2022 (20 days). Both sources were provided by our
+partner companies and cannot be released publicly; access may be granted on
+request, and enquiries should be directed to the corresponding author.
+
+To run the code, place your own copies under `data/` with the following
+structure and column names.
+
+| File | Required columns |
+| --- | --- |
+| `bike20221212-20230101.csv` | `BICYCLE_ID`, `DATA_TIME`, `LONGITUDE`, `LATITUDE`, `LOCK_STATUS` |
+| `metro_station_coordinates.csv` | `stationnames`, `lon`, `lat` |
+| `station_info.csv` | `FSTR_LINEID`, `FSTR_STATIONID`, `FSTR_STATIONNAME` |
+| `afc_5min/HIST_STO_5MFLOW_5M_YYYYMMDD.CSV` | `FSTR_LINEID`, `FSTR_STATIONID`, `FDT_STARTTIME`, `FDT_ENDTIME`, `FINT_IN`, `FINT_OUT` |
+
+## Installation
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Usage
 
 The pipeline runs in four stages, mirroring the structure of the paper.
 
@@ -11,7 +57,7 @@ raw AFC + bike logs
         v
   01_build_station_panel.py      ->  5-minute station-time panel per buffer radius
         |
-        +--> 02_coupling_diagnostics.py   -> Table 1 (Granger), Table 2 (NB-GLM)
+        +--> 02_coupling_diagnostics.py   -> Table 1, Table 2
         |
         +--> 03_forecast_global.py --resolution 5min  -> Table 6, Fig. 7
         |
@@ -23,30 +69,7 @@ raw AFC + bike logs
         +--> 04_forecast_station_level.py             -> Table 7, Fig. 8
 ```
 
-## Installation
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Data
-
-The Shanghai AFC and dockless-bike records were provided by our partner
-companies and cannot be released publicly. Access may be granted on request;
-please contact the corresponding author. To run the code, place your own copies
-under `data/` with the following structure and column names.
-
-| File | Required columns |
-| --- | --- |
-| `bike20221212-20230101.csv` | `BICYCLE_ID`, `DATA_TIME`, `LONGITUDE`, `LATITUDE`, `LOCK_STATUS` |
-| `metro_station_coordinates.csv` | `stationnames`, `lon`, `lat` |
-| `station_info.csv` | `FSTR_LINEID`, `FSTR_STATIONID`, `FSTR_STATIONNAME` |
-| `afc_5min/HIST_STO_5MFLOW_5M_YYYYMMDD.CSV` | `FSTR_LINEID`, `FSTR_STATIONID`, `FDT_STARTTIME`, `FDT_ENDTIME`, `FINT_IN`, `FINT_OUT` |
-
-Analysis window: 12–31 December 2022 (20 days).
-
-## Stage 1 — Travel-chain reconstruction
+**Stage 1 — Travel-chain reconstruction**
 
 ```bash
 python src/01_build_station_panel.py \
@@ -58,55 +81,26 @@ python src/01_build_station_panel.py \
     --buffers 50 100 200 500
 ```
 
-Lock/unlock events are mirrored with a one-second offset and inverted lock state
-so that point events become continuous intervals; midnight anchors are added at
-both ends of each bicycle's day; riding and parking segments are classified from
-consecutive lock states; segments shorter than 10 s are discarded. Bike events
-are then matched to metro station exits by Manhattan distance in Web Mercator
-metres and aggregated onto the 5-minute AFC grid as `ride_in`, `ride_out` and
-`delta_bikes`.
-
-Output: `outputs/panel/{50,100,200,500}m/merged_YYYYMMDD.csv`.
-
-## Stage 1b — Hourly aggregation
+**Stage 1b — Hourly aggregation**
 
 ```bash
 python src/01b_aggregate_hourly.py --panel-root outputs/panel --buffers 50 100 200 500
 ```
 
-Sums the four count columns within each (line, station, date, hour) cell.
-
-Output: `outputs/panel/{50,100,200,500}m/20days_data_1h.csv`, with columns
-`FINT_IN_1h`, `FINT_OUT_1h`, `ride_in_1h`, `ride_out_1h` plus the station
-identifiers, coordinates, `date` and `hour`.
-
-The original notebook first concatenated all 20 daily files into an intermediate
-`20days_data.csv` and grouped afterwards. This script groups each day separately
-and concatenates the results, which is arithmetically identical because `date`
-is a grouping key and no hour spans two days, but keeps peak memory
-proportional to one day instead of the whole window.
-
-## Stage 2 — Coupling diagnostics
+**Stage 2 — Coupling diagnostics**
 
 ```bash
 python src/02_coupling_diagnostics.py --panel-root outputs/panel --test all
 ```
 
-Runs bidirectional Granger causality tests (maximum lag 5) and station
-fixed-effect Negative Binomial GLMs for each buffer radius. The NB-GLM
-coefficient profile across buffers is what identifies 100 m as the peak-coupling
-catchment used downstream.
-
-Output: `outputs/diagnostics/granger_5min.csv`, `outputs/diagnostics/nb_glm_5min.csv`.
-
-## Stage 3 — Network-wide forecasting
+**Stage 3 — Network-wide forecasting**
 
 ```bash
-# Scenario A: 5-minute resolution (Table 6, Fig. 7)
+# 5-minute resolution
 python src/03_forecast_global.py --resolution 5min \
     --panel-dir outputs/panel/100m --out-dir outputs/forecast_5min
 
-# Scenario B: 1-hour resolution, both input settings (Table 4)
+# 1-hour resolution, AR and Semi-AR inputs
 python src/03_forecast_global.py --resolution 1h --features ar \
     --hourly-csv outputs/panel/200m/20days_data_1h.csv \
     --out-dir outputs/forecast_1h_ar
@@ -116,61 +110,46 @@ python src/03_forecast_global.py --resolution 1h --features semi_ar \
     --out-dir outputs/forecast_1h_semi_ar
 ```
 
-`--features ar` supplies bike flows and calendar features only;
-`--features semi_ar` adds metro entries and exits.
-
-## Stage 4 — Station-level forecasting
+**Stage 4 — Station-level forecasting**
 
 ```bash
 python src/04_forecast_station_level.py --mode train \
     --hourly-csv outputs/panel/200m/20days_data_1h.csv \
     --out-dir outputs/station_level --nodes 95 144 239 298
-
-# redraw figures from saved checkpoints without retraining
-python src/04_forecast_station_level.py --mode plot \
-    --hourly-csv outputs/panel/200m/20days_data_1h.csv \
-    --out-dir outputs/station_level
 ```
 
-Models are trained on the full station graph, but the loss and the reported
-metrics are restricted to one station at a time. Node indices follow the
-alphabetical order of station names in the hourly panel, so they must be
-re-checked if the station list changes.
+Use `--mode plot` to redraw figures from saved checkpoints without retraining.
+Node indices follow the alphabetical order of station names in the hourly panel
+and must be re-checked if the station list changes.
 
-## Reproducibility notes and known gaps
+## Notes
 
-All four scripts have been run end to end on a synthetic dataset with the
-schema documented above, so the pipeline itself executes without errors on
-pandas 2.x and torch 2.x. The following are documented so that anyone rerunning
-the code knows where the published numbers cannot be regenerated end to end from
-this repository alone.
+All four scripts have been run end to end on a synthetic dataset with the schema
+documented above, so the pipeline executes without errors on pandas 2.x and
+torch 2.x. A few points are recorded so that anyone rerunning the code knows
+where the published numbers cannot be regenerated from this repository alone.
 
+· **Buffer radius.** The 5-minute scenario reads the 100 m panel; the hourly
+scenarios were run against the 200 m panel. The default paths reflect what was
+actually run. Change `--hourly-csv` to the 100 m directory for a 100 m setting
+throughout.
 
-   ```
+· **Hourly attention variants.** The attention-augmented rows in the Semi-AR
+block use the module implemented in stage 4. The network-wide script implements
+attention only in the 5-minute models, so these variants require the stage 4
+backbone evaluated over all stations rather than one.
 
-1. **Buffer radius used by the forecasting stages.** The paper states that node
-   features aggregate lock/unlock events within 100 m of each station exit. The
-   5-minute scenario does read the 100 m panel, but the hourly scenarios were run
-   against the 200 m panel. The default paths reflect what was actually run;
-   change `--hourly-csv` to the 100 m directory if the intention was 100 m
-   throughout.
+· **Figure 4** (kernel density of bike activity) was produced in ArcGIS and has
+no counterpart in this repository.
 
-2. **Table 4 / Table 5 / Figure 6.** The AR and Semi-AR rows are produced by
-   running stage 3 twice with different `--features` values. The attention-
-   augmented variants reported in the Semi-AR block ("MBC-GCN + Attn",
-   "ST-GCN + Attn") use the attention module implemented in stage 4; the
-   network-wide script implements attention only in the 5-minute models, so the
-   hourly attention variants would need to be run with the stage 4 backbone
-   evaluated over all stations rather than one.
+· **Non-determinism.** Optuna searches, model initialisation and dropout are
+seeded only for the station-level sampler (`RANDOM_SEED = 20260301`). Metric
+values vary by a small margin between runs.
 
-3. **Figure 4 (kernel density of bike activity)** was produced in ArcGIS and has
-   no counterpart in this repository.
+## Citation
 
-4. **Non-determinism.** Optuna searches, model initialisation and dropout are
-   seeded only for the station-level sampler (`RANDOM_SEED = 20260301`). Metric
-   values will vary by a small margin between runs.
-
-
+If you use this code, please cite the paper. Data cannot be redistributed;
+requests should be directed to the corresponding author.
 
 ## Citation
 
